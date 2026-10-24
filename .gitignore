@@ -1,0 +1,19 @@
+# Allowlist: ignore everything, then un-ignore each tracked file explicitly.
+*
+
+!.gitignore
+!README.md
+!LICENSE
+
+# the tools
+!sdcard.py
+!integrity.py
+!exfat_scan.py
+!validate_entries.py
+!exfat_extract.py
+!test_sdcard.py
+
+# Deliberately NOT tracked:
+#   canon_split.json  - generated run data; a list of absolute paths to photos
+#   __pycache__/      - build artefact
+#   *.json            - recovered_entries / validated_entries are run output
