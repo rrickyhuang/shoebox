@@ -608,6 +608,38 @@ def _t_capture_info():
 
 
 _guard("capture_info EXIF parser", _t_capture_info)
+
+
+def _t_ingest_partial_copy():
+    root = sandbox()
+    real = shutil.copy2
+    try:
+        # the card must sit OUTSIDE the library root, or `index` would
+        # index it and the ingest would see its file as already present
+        cardroot = tempfile.mkdtemp(prefix="sdcard_")
+        card = os.path.join(cardroot, "card")
+        write(os.path.join(card, "DCIM", "IMG_1.CR2"), b"x" * 5000)
+        write(os.path.join(sdcard.LIB, "other.CR2"), b"unrelated")
+        sdcard.cmd_index([])
+
+        def dying_copy(src, dst, *a, **k):
+            with open(dst, "wb") as f:      # truncated write, then an I/O error
+                f.write(b"x" * 100)
+            raise IOError("simulated read error midway")
+
+        shutil.copy2 = dying_copy
+        with contextlib.redirect_stdout(io.StringIO()):
+            sdcard.cmd_ingest([card, "--execute"])
+        left = [p for p in allfiles(sdcard.INBOX)]
+        check("issue 1: a copy that fails midway is not left in the Inbox",
+              not left, "Inbox holds %s" % left)
+    finally:
+        shutil.copy2 = real
+        shutil.rmtree(cardroot, ignore_errors=True)
+        shutil.rmtree(root, ignore_errors=True)
+
+
+_guard("ingest partial copy", _t_ingest_partial_copy)
 bad = [n for n, ok, _ in results if not ok]
 print("  %d/%d passed" % (len(results) - len(bad), len(results)))
 if bad:

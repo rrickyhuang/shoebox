@@ -837,17 +837,29 @@ def cmd_ingest(args):
                 cand = os.path.join(dest_dir, "%s__%s_%d%s" % (stem, tag, k, ext))
                 k += 1
             target = cand
+        verified = False
         try:
             shutil.copy2(p, target)
             if fullhash(p) != fullhash(target):
-                os.remove(target)
                 raise IOError("hash mismatch after copy")
+            verified = True
             st = os.stat(target)
             c.execute("insert or replace into files values(?,?,?,?,?)",
                       (target, st.st_size, st.st_mtime,
                        quickhash(target, st.st_size), None))
             copied += 1
         except Exception as e:
+            # Any failure before the copy was verified (a read error midway,
+            # a hash mismatch, an error while hashing) leaves a truncated or
+            # unchecked file at `target`. `file` would move it into the Library
+            # and the index has no row for it, so remove it now. `target` is
+            # always a fresh name (collisions are uniquified above), so this
+            # can only delete the copy made just now.
+            if not verified:
+                try:
+                    os.remove(target)
+                except OSError:
+                    pass
             failed += 1
             if len(errs) < 10:
                 errs.append("%s: %s" % (p, e))
