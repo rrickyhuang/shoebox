@@ -33,6 +33,7 @@ LIB = os.path.join(BASE, "Library")
 INBOX = os.path.join(BASE, "Inbox")
 INDEX = os.path.join(BASE, ".photo-index.db")
 QUARANTINE = "_suspect"      # Inbox subfolder for files that failed verify
+MANIFEST = ".ingest-manifest.json"   # written by ingest into each staging dir
 TRIPS_JSON = os.path.join(BASE, "trips.json")
 
 RAW = {".cr2", ".cr3", ".dng", ".nef", ".arw", ".raf", ".orf", ".rw2", ".pef", ".srw"}
@@ -588,6 +589,29 @@ def skip_opt(args):
     return out
 
 
+def write_manifest(dest_dir, entries):
+    """Record staged name -> card-relative source path, size and card MD5.
+
+    verify matches by this, not by basename: ingest renames colliding files
+    (IMG_1__100CANON.CR2) and a card can legitimately hold the same basename
+    twice, so names cannot identify the card original.
+    """
+    tmp = os.path.join(dest_dir, MANIFEST + ".tmp")
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump(entries, fh, indent=1)
+        fh.flush()
+        os.fsync(fh.fileno())
+    os.replace(tmp, os.path.join(dest_dir, MANIFEST))
+
+
+def read_manifest(dir_path):
+    try:
+        with open(os.path.join(dir_path, MANIFEST), encoding="utf-8") as fh:
+            return json.load(fh)
+    except (OSError, ValueError):
+        return None
+
+
 def cmd_verify(args):
     """Independently re-check every staged Inbox file against its card original.
 
@@ -612,29 +636,47 @@ def cmd_verify(args):
     staged = [os.path.join(dp, f)
               for dp, dn, fn in os.walk(INBOX)
               if QUARANTINE not in dp.split(os.sep)
-              for f in fn if not f.startswith("._")]
+              for f in fn if not f.startswith("._")
+              and os.path.splitext(f)[1].lower() in MEDIA]
     if not staged:
         sys.exit("Inbox is empty -- nothing to verify")
-    card = {}
-    for q in walk_media(root, {"$recycle.bin", "system volume information"}):
-        card.setdefault(os.path.basename(q), q)
-    dupnames = {}
-    for q in walk_media(root, {"$recycle.bin", "system volume information"}):
-        dupnames[os.path.basename(q)] = dupnames.get(os.path.basename(q), 0) + 1
-    ambiguous = {k for k, v in dupnames.items() if v > 1}
-    if ambiguous:
-        print("  NOTE: %d basenames occur more than once on this card; those files"
-              % len(ambiguous))
-        print("        cannot be matched by name alone and are reported, not judged.")
+    manifests = {}
+    for f in staged:
+        d = os.path.dirname(f)
+        if d not in manifests:
+            manifests[d] = read_manifest(d)
+    # Files without a manifest entry (staged by an older version, or an
+    # interrupted ingest) fall back to matching by basename. Walk the card
+    # once, and only if that fallback is needed.
+    card, ambiguous = {}, set()
+    if any(not (manifests[os.path.dirname(f)] or {}).get(os.path.basename(f))
+           for f in staged):
+        for q in walk_media(root, {"$recycle.bin", "system volume information"}):
+            b = os.path.basename(q)
+            if b in card:
+                ambiguous.add(b)
+            card.setdefault(b, q)
+        if ambiguous:
+            print("  NOTE: %d basenames occur more than once on this card; staged"
+                  % len(ambiguous))
+            print("        files without a manifest entry cannot be matched by "
+                  "name alone and are reported, not judged.")
 
     print("  verifying %d staged files against %s" % (len(staged), root))
     good, bad, unmatched = 0, [], []
     for i, f in enumerate(staged, 1):
         base = os.path.basename(f)
-        if base in ambiguous or base not in card:
+        ent = (manifests[os.path.dirname(f)] or {}).get(base)
+        if ent:
+            src = os.path.join(root, ent["card_path"])
+            if not os.path.isfile(src):
+                unmatched.append(f)       # that file is not on this card
+                continue
+        elif base in ambiguous or base not in card:
             unmatched.append(f)
             continue
-        src = card[base]
+        else:
+            src = card[base]
         try:
             if os.path.getsize(f) != os.path.getsize(src):
                 bad.append((f, "size %d vs card %d"
@@ -651,7 +693,7 @@ def cmd_verify(args):
     print("")
     print("  verified identical to the card : %d" % good)
     print("  FAILED                         : %d" % len(bad))
-    print("  could not be matched by name   : %d" % len(unmatched))
+    print("  could not be matched           : %d" % len(unmatched))
     for f, why in bad[:25]:
         print("      %s  <- %s" % (os.path.basename(f), why))
     if len(bad) > 25:
@@ -663,7 +705,8 @@ def cmd_verify(args):
               % (good, len(staged)))
         print("  %d could not be matched to a file on this card. Wrong drive, wrong"
               % len(unmatched))
-        print("  card, already ejected, or renamed during ingest. Do not file yet.")
+        print("  card, already ejected, or staged without a manifest and ambiguous"
+              " by name. Do not file yet.")
         return
     if bad:
         q = os.path.join(INBOX, QUARANTINE)
@@ -819,6 +862,8 @@ def cmd_ingest(args):
     c = db()
     copied = failed = 0
     errs = []
+    card_root = drive if drive.endswith((os.sep, "/")) else drive + os.sep
+    manifest = {}
     for p, _ in new:
         name = os.path.basename(p)
         target = os.path.join(dest_dir, name)
@@ -840,13 +885,17 @@ def cmd_ingest(args):
         verified = False
         try:
             shutil.copy2(p, target)
-            if fullhash(p) != fullhash(target):
+            src_md5 = fullhash(p)
+            if src_md5 != fullhash(target):
                 raise IOError("hash mismatch after copy")
             verified = True
             st = os.stat(target)
             c.execute("insert or replace into files values(?,?,?,?,?)",
                       (target, st.st_size, st.st_mtime,
                        quickhash(target, st.st_size), None))
+            manifest[os.path.basename(target)] = {
+                "card_path": os.path.relpath(p, card_root),
+                "size": st.st_size, "md5": src_md5}
             copied += 1
         except Exception as e:
             # Any failure before the copy was verified (a read error midway,
@@ -865,8 +914,12 @@ def cmd_ingest(args):
                 errs.append("%s: %s" % (p, e))
         if copied % 200 == 0:
             c.commit()
+            if manifest:
+                write_manifest(dest_dir, manifest)
     c.commit()
     c.close()
+    if manifest:
+        write_manifest(dest_dir, manifest)
     print("  copied %d, each verified by hash.  failed %d" % (copied, failed))
     for e in errs:
         print("    %s" % e)
@@ -1000,6 +1053,12 @@ def cmd_file(args):
     c.commit()
     c.close()
     for dp, dn, fn in os.walk(INBOX, topdown=False):
+        if not dn and fn == [MANIFEST] and dp != INBOX:
+            try:                      # everything it described has been filed
+                os.remove(os.path.join(dp, MANIFEST))
+                fn = []
+            except OSError:
+                pass
         if not dn and not fn and dp != INBOX:
             try:
                 os.rmdir(dp)

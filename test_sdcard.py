@@ -113,7 +113,8 @@ c.commit()
 c.close()
 with contextlib.redirect_stdout(io.StringIO()):
     sdcard.cmd_ingest([card, "--execute"])
-staged = [p for p in allfiles(sdcard.INBOX)]
+staged = [p for p in allfiles(sdcard.INBOX)
+          if os.path.basename(p) != sdcard.MANIFEST]
 bodies = sorted(open(p, "rb").read() for p in staged)
 check("finding 5: all three same-named card files land separately",
       bodies == [b"AAA", b"BBB", b"CCC"],
@@ -640,6 +641,57 @@ def _t_ingest_partial_copy():
 
 
 _guard("ingest partial copy", _t_ingest_partial_copy)
+
+
+def _t_verify_manifest():
+    root = sandbox()
+    cardroot = tempfile.mkdtemp(prefix="sdcard_")
+    try:
+        card = os.path.join(cardroot, "card")
+        # same basename twice on one card (counter wrap across DCIM folders)
+        write(os.path.join(card, "DCIM", "100CANON", "IMG_1.CR2"), b"first-photo")
+        write(os.path.join(card, "DCIM", "101CANON", "IMG_1.CR2"), b"second-photo")
+        write(os.path.join(card, "DCIM", "100CANON", "IMG_2.CR2"), b"third-photo")
+        write(os.path.join(sdcard.LIB, "other.CR2"), b"unrelated")
+        sdcard.cmd_index([])
+        with contextlib.redirect_stdout(io.StringIO()):
+            sdcard.cmd_ingest([card, "--execute"])
+        staged = sorted(os.path.basename(p) for p in allfiles(sdcard.INBOX)
+                        if not p.endswith(sdcard.MANIFEST))
+        check("issue 2: ingest renamed the colliding file",
+              any("__" in n for n in staged), "staged %s" % staged)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            sdcard.cmd_verify([card])
+        check("issue 2: renamed + duplicate-basename files verify clean",
+              "safe to file" in out.getvalue(), out.getvalue().strip()[-200:])
+
+        # corrupt one staged file: must be caught and quarantined, not blessed
+        victim = [p for p in allfiles(sdcard.INBOX)
+                  if "__" in os.path.basename(p)][0]
+        write(victim, b"CORRUPTED!!!")
+        with contextlib.redirect_stdout(io.StringIO()):
+            sdcard.cmd_verify([card])
+        q = os.path.join(sdcard.INBOX, sdcard.QUARANTINE)
+        check("issue 2: a corrupted renamed file is quarantined",
+              os.path.isdir(q) and len(os.listdir(q)) == 1,
+              "quarantine: %s" % (os.listdir(q) if os.path.isdir(q) else None))
+
+        # no manifest (older staging): falls back to basename matching
+        for p in allfiles(sdcard.INBOX):
+            if p.endswith(sdcard.MANIFEST):
+                os.remove(p)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            sdcard.cmd_verify([card])
+        check("issue 2: without a manifest, ambiguous names are still NOT CLEAR",
+              "NOT CLEAR" in out.getvalue())
+    finally:
+        shutil.rmtree(cardroot, ignore_errors=True)
+        shutil.rmtree(root, ignore_errors=True)
+
+
+_guard("verify manifest", _t_verify_manifest)
 bad = [n for n, ok, _ in results if not ok]
 print("  %d/%d passed" % (len(results) - len(bad), len(results)))
 if bad:
