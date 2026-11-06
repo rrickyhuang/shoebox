@@ -494,17 +494,45 @@ def _t_unique_target():
         check("rev2 f8: a third one too -- none of them collide",
               len({t1, t2, t3}) == 3, "paths: %s" % [os.path.basename(x) for x in (t1, t2, t3)])
 
-        # a previous run already wrote this exact entry, complete
+        # a previous run already wrote this exact entry, complete -- and the
+        # manifest says so
         write(os.path.join(dest, "IMG_9.CR2"), b"z" * 64)
-        t4, done = X.unique_target(dest, "IMG_9.CR2", 77, set(), 64)
-        check("rev2 f8: a complete file from a previous run is recognised, not redone",
+        man = {"IMG_9.CR2": {"name": "IMG_9.CR2", "cluster": 77, "len": 64}}
+        t4, done = X.unique_target(dest, "IMG_9.CR2", 77, set(), 64, man)
+        check("#3: an entry the manifest recorded is recognised, not redone",
               done and os.path.basename(t4) == "IMG_9.CR2")
 
-        # same name on disk but the WRONG length: must not be reused or clobbered
-        t5, done = X.unique_target(dest, "IMG_9.CR2", 77, set(), 999)
-        check("rev2 f8: a same-name file of different length is not overwritten",
+        # same name AND size on disk, but no manifest record: another card's
+        # file. It must be kept, and this entry must get its own path
+        t5, done = X.unique_target(dest, "IMG_9.CR2", 88, set(), 64, man)
+        check("#3: a same-name same-size file from elsewhere is not taken for ours",
               not done and os.path.basename(t5) != "IMG_9.CR2",
-              "would have written to %s" % os.path.basename(t5))
+              "went to %s" % os.path.basename(t5))
+        t5b, done = X.unique_target(dest, "IMG_9.CR2", 88, set(), 64)
+        check("#3: with no manifest at all nothing counts as already done",
+              not done and os.path.basename(t5b) != "IMG_9.CR2")
+
+        # the entry that was redirected to a __cl name is recognised on re-run
+        write(t5, b"q" * 64)
+        man[os.path.basename(t5)] = {"name": "IMG_9.CR2", "cluster": 88, "len": 64}
+        t6, done = X.unique_target(dest, "IMG_9.CR2", 88, set(), 64, man)
+        check("#3: a redirected entry is found again through the manifest",
+              done and t6 == t5)
+
+        # recorded but the file is now the wrong length (truncated since)
+        write(t5, b"q" * 10)
+        t7, done = X.unique_target(dest, "IMG_9.CR2", 88, set(), 64, man)
+        check("#3: a recorded file whose length changed is not trusted",
+              not done)
+
+        # manifest round trip, and a corrupt one is ignored (and set aside)
+        X.write_manifest(dest, man)
+        check("#3: manifest round-trips", X.read_manifest(dest) == man)
+        with open(os.path.join(dest, X.MANIFEST), "w") as fh:
+            fh.write("{not json")
+        check("#3: a corrupt manifest is ignored and moved aside",
+              X.read_manifest(dest) == {}
+              and os.path.exists(os.path.join(dest, X.MANIFEST + ".bad")))
     finally:
         shutil.rmtree(root, ignore_errors=True)
 
