@@ -49,6 +49,11 @@ python sdcard.py sync-trips --execute   make trips.json match the folder names o
 
 `--skip-dir NAME` ignores a folder a card is carrying that is not photographs.
 
+`ingest` writes a `.ingest-manifest.json` into each staging folder (staged name,
+card path, MD5). `verify` matches by that manifest, so renamed collisions and
+repeated card filenames verify correctly; `file` removes the manifest once its
+folder is empty. Folders staged without one fall back to matching by name.
+
 **Nothing is ever written to a card.** Every device handle is opened read-only.
 
 Commands that write to the *library*: `ingest --execute`, `file --execute`,
