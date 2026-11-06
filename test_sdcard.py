@@ -719,6 +719,85 @@ def _t_verify_wrong_card():
 
 
 _guard("verify wrong card", _t_verify_wrong_card)
+
+
+def _t_ingest_interrupted():
+    root = sandbox()
+    cardroot = tempfile.mkdtemp(prefix="sdcard_")
+    real = shutil.copy2
+    try:
+        card = os.path.join(cardroot, "card")
+        write(os.path.join(card, "DCIM", "100CANON", "IMG_1.CR2"), b"first")
+        write(os.path.join(card, "DCIM", "101CANON", "IMG_1.CR2"), b"second")
+        write(os.path.join(sdcard.LIB, "other.CR2"), b"unrelated")
+        sdcard.cmd_index([])
+        calls = []
+
+        def ctrl_c_on_second(src, dst, *a, **k):
+            calls.append(src)
+            if len(calls) == 2:
+                with open(dst, "wb") as f:
+                    f.write(b"se")
+                raise KeyboardInterrupt
+            return real(src, dst, *a, **k)
+
+        shutil.copy2 = ctrl_c_on_second
+        interrupted = False
+        try:
+            with contextlib.redirect_stdout(io.StringIO()):
+                sdcard.cmd_ingest([card, "--execute"])
+        except KeyboardInterrupt:
+            interrupted = True
+        shutil.copy2 = real
+        media = [p for p in allfiles(sdcard.INBOX)
+                 if not p.endswith(sdcard.MANIFEST)]
+        man = [sdcard.read_manifest(os.path.dirname(p)) for p in media]
+        check("review: Ctrl-C mid-ingest propagates, removes the partial copy "
+              "and keeps the finished copy's manifest entry",
+              interrupted and len(media) == 1
+              and man[0].get(os.path.basename(media[0])),
+              "interrupted=%s media=%s manifest=%s" % (interrupted, media, man))
+    finally:
+        shutil.copy2 = real
+        shutil.rmtree(cardroot, ignore_errors=True)
+        shutil.rmtree(root, ignore_errors=True)
+
+
+_guard("ingest interrupted", _t_ingest_interrupted)
+
+
+def _t_manifest_malformed():
+    root = sandbox()
+    cardroot = tempfile.mkdtemp(prefix="sdcard_")
+    try:
+        card = os.path.join(cardroot, "card")
+        write(os.path.join(card, "DCIM", "100CANON", "IMG_1.CR2"), b"photo")
+        write(os.path.join(sdcard.LIB, "other.CR2"), b"unrelated")
+        sdcard.cmd_index([])
+        with contextlib.redirect_stdout(io.StringIO()):
+            sdcard.cmd_ingest([card, "--execute"])
+        mp = [p for p in allfiles(sdcard.INBOX) if p.endswith(sdcard.MANIFEST)][0]
+        for junk in ("[1, 2]", '{"IMG_1.CR2": {"size": 5}}', '{"IMG_1.CR2": 7}'):
+            write(mp, junk.encode())
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                sdcard.cmd_verify([card])
+            check("review: malformed manifest %s falls back to name matching"
+                  % junk, "safe to file" in out.getvalue(),
+                  out.getvalue().strip()[-120:])
+        write(mp + ".tmp", b"{")       # stranded by a failed write
+        with contextlib.redirect_stdout(io.StringIO()):
+            sdcard.cmd_file(["--execute"])
+        check("review: file clears a staging folder holding a stray .tmp",
+              not os.path.exists(os.path.dirname(mp)),
+              os.listdir(os.path.dirname(mp))
+              if os.path.isdir(os.path.dirname(mp)) else "")
+    finally:
+        shutil.rmtree(cardroot, ignore_errors=True)
+        shutil.rmtree(root, ignore_errors=True)
+
+
+_guard("manifest malformed", _t_manifest_malformed)
 bad = [n for n, ok, _ in results if not ok]
 print("  %d/%d passed" % (len(results) - len(bad), len(results)))
 if bad:

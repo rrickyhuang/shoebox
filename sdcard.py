@@ -313,6 +313,12 @@ class WalkFailed(Exception):
     result as a complete listing."""
 
 
+def drive_root(drive):
+    """'E:' -> 'E:\\'. Ingest records card paths relative to this and verify
+    joins them back onto it, so both must normalise the drive the same way."""
+    return drive if drive.endswith((os.sep, "/")) else drive + os.sep
+
+
 def _raise(err):
     raise WalkFailed(err)
 
@@ -398,7 +404,7 @@ def triage(drive, skip_dirs=()):
     videos that had no EXIF at all, so they would have been dated by mtime and
     filed as if they were photographs.
     """
-    root = drive if drive.endswith((os.sep, "/")) else drive + os.sep
+    root = drive_root(drive)
     if not os.path.isdir(root):
         sys.exit("no such drive: %s" % root)
     c = db()
@@ -597,19 +603,33 @@ def write_manifest(dest_dir, entries):
     twice, so names cannot identify the card original.
     """
     tmp = os.path.join(dest_dir, MANIFEST + ".tmp")
-    with open(tmp, "w", encoding="utf-8") as fh:
-        json.dump(entries, fh, indent=1)
-        fh.flush()
-        os.fsync(fh.fileno())
-    os.replace(tmp, os.path.join(dest_dir, MANIFEST))
+    try:
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(entries, fh, indent=1)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, os.path.join(dest_dir, MANIFEST))
+    except BaseException:
+        # a stranded .tmp would keep `file` from ever clearing the folder
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        raise
 
 
 def read_manifest(dir_path):
+    """staged name -> entry, keeping only well-formed entries; {} if absent."""
     try:
         with open(os.path.join(dir_path, MANIFEST), encoding="utf-8") as fh:
-            return json.load(fh)
+            data = json.load(fh)
     except (OSError, ValueError):
-        return None
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    return {k: v for k, v in data.items()
+            if isinstance(v, dict) and isinstance(v.get("card_path"), str)
+            and isinstance(v.get("size"), int) and isinstance(v.get("md5"), str)}
 
 
 def cmd_verify(args):
@@ -625,7 +645,7 @@ def cmd_verify(args):
     deleted on a diagnosis that could not be substantiated.
     """
     drive = args[0]
-    root = drive if drive.endswith((os.sep, "/")) else drive + os.sep
+    root = drive_root(drive)
     if not os.path.isdir(root):
         sys.exit("no such drive: %s" % root)
     # Skip the quarantine, exactly as cmd_file does. Without this, once
@@ -633,11 +653,7 @@ def cmd_verify(args):
     # no longer match the card, so they either land in `unmatched` (and the
     # run can never come back clear) or get quarantined again under _2, _3,
     # accumulating copies of the same bad file.
-    staged = [os.path.join(dp, f)
-              for dp, dn, fn in os.walk(INBOX)
-              if QUARANTINE not in dp.split(os.sep)
-              for f in fn if not f.startswith("._")
-              and os.path.splitext(f)[1].lower() in MEDIA]
+    staged = list(walk_media(INBOX, {QUARANTINE}))
     if not staged:
         sys.exit("Inbox is empty -- nothing to verify")
     manifests = {}
@@ -645,12 +661,13 @@ def cmd_verify(args):
         d = os.path.dirname(f)
         if d not in manifests:
             manifests[d] = read_manifest(d)
+    entries = {f: manifests[os.path.dirname(f)].get(os.path.basename(f))
+               for f in staged}
     # Files without a manifest entry (staged by an older version, or an
     # interrupted ingest) fall back to matching by basename. Walk the card
     # once, and only if that fallback is needed.
     card, ambiguous = {}, set()
-    if any(not (manifests[os.path.dirname(f)] or {}).get(os.path.basename(f))
-           for f in staged):
+    if not all(entries.values()):
         for q in walk_media(root, {"$recycle.bin", "system volume information"}):
             b = os.path.basename(q)
             if b in card:
@@ -666,33 +683,38 @@ def cmd_verify(args):
     good, bad, unmatched = 0, [], []
     for i, f in enumerate(staged, 1):
         base = os.path.basename(f)
-        ent = (manifests[os.path.dirname(f)] or {}).get(base)
+        ent = entries[f]
         if ent:
             src = os.path.join(root, ent["card_path"])
             if not os.path.isfile(src):
                 unmatched.append(f)       # that file is not on this card
                 continue
-            try:
-                # The staged copy still equals what ingest read, but the file
-                # at that path now differs: a different card with the same
-                # layout (or one edited since). Do not call good files bad.
-                if (os.path.getsize(src) != ent["size"]
-                        or fullhash(src) != ent["md5"]) \
-                        and fullhash(f) == ent["md5"]:
-                    unmatched.append(f)
-                    continue
-            except (OSError, KeyError):
-                pass
         elif base in ambiguous or base not in card:
             unmatched.append(f)
             continue
         else:
             src = card[base]
         try:
-            if os.path.getsize(f) != os.path.getsize(src):
-                bad.append((f, "size %d vs card %d"
-                            % (os.path.getsize(f), os.path.getsize(src))))
-            elif fullhash(f) == fullhash(src):
+            fsize, ssize = os.path.getsize(f), os.path.getsize(src)
+            # Hash each side at most once: a card is slow to read.
+            src_md5 = fullhash(src) if fsize == ssize or ent else None
+            if ent and (ssize != ent["size"] or src_md5 != ent["md5"]):
+                # The file at that card path is not what ingest read: a
+                # different card with the same layout (or one edited since).
+                # If the staged copy still equals what ingest read, it is
+                # unmatched, not bad -- do not call good files bad.
+                staged_md5 = fullhash(f)
+                if staged_md5 == ent["md5"]:
+                    unmatched.append(f)
+                elif fsize != ssize:
+                    bad.append((f, "size %d vs card %d" % (fsize, ssize)))
+                elif staged_md5 == src_md5:
+                    good += 1
+                else:
+                    bad.append((f, "same size, different content"))
+            elif fsize != ssize:
+                bad.append((f, "size %d vs card %d" % (fsize, ssize)))
+            elif fullhash(f) == src_md5:
                 good += 1
             else:
                 bad.append((f, "same size, different content"))
@@ -873,7 +895,7 @@ def cmd_ingest(args):
     c = db()
     copied = failed = 0
     errs = []
-    card_root = drive if drive.endswith((os.sep, "/")) else drive + os.sep
+    card_root = drive_root(drive)
     manifest, saved = {}, 0
 
     def save_manifest():
@@ -885,61 +907,73 @@ def cmd_ingest(args):
             except OSError as e:
                 print("  WARNING: could not write %s: %s" % (MANIFEST, e))
 
-    for p, _ in new:
-        name = os.path.basename(p)
-        target = os.path.join(dest_dir, name)
-        if os.path.exists(target):
-            # Two card files can share a basename AND a parent-folder leaf name
-            # (two bodies, a BACKUP tree, a re-imported card image), so the
-            # __tag form is not unique either. Loop until it is: without this,
-            # copy2 silently truncated the previous file and the hash check
-            # compared the source against the copy it had just overwritten, so
-            # the loss was invisible and still counted as copied.
-            tag = os.path.basename(os.path.dirname(p))
-            stem, ext = os.path.splitext(name)
-            cand = os.path.join(dest_dir, "%s__%s%s" % (stem, tag, ext))
-            k = 2
-            while os.path.exists(cand):
-                cand = os.path.join(dest_dir, "%s__%s_%d%s" % (stem, tag, k, ext))
-                k += 1
-            target = cand
-        verified = False
-        try:
-            shutil.copy2(p, target)
-            src_md5 = fullhash(p)
-            if src_md5 != fullhash(target):
-                raise IOError("hash mismatch after copy")
-            st = os.stat(target)
-            manifest[os.path.basename(target)] = {
-                "card_path": os.path.relpath(p, card_root),
-                "size": st.st_size, "md5": src_md5}
-            verified = True
-            c.execute("insert or replace into files values(?,?,?,?,?)",
-                      (target, st.st_size, st.st_mtime,
-                       quickhash(target, st.st_size), None))
-            copied += 1
-        except Exception as e:
-            # Any failure before the copy was verified (a read error midway,
-            # a hash mismatch, an error while hashing) leaves a truncated or
-            # unchecked file at `target`. `file` would move it into the Library
-            # and the index has no row for it, so remove it now. `target` is
-            # always a fresh name (collisions are uniquified above), so this
-            # can only delete the copy made just now.
-            if not verified:
+    try:
+        for p, _ in new:
+            name = os.path.basename(p)
+            target = os.path.join(dest_dir, name)
+            if os.path.exists(target):
+                # Two card files can share a basename AND a parent-folder leaf name
+                # (two bodies, a BACKUP tree, a re-imported card image), so the
+                # __tag form is not unique either. Loop until it is: without this,
+                # copy2 silently truncated the previous file and the hash check
+                # compared the source against the copy it had just overwritten, so
+                # the loss was invisible and still counted as copied.
+                tag = os.path.basename(os.path.dirname(p))
+                stem, ext = os.path.splitext(name)
+                cand = os.path.join(dest_dir, "%s__%s%s" % (stem, tag, ext))
+                k = 2
+                while os.path.exists(cand):
+                    cand = os.path.join(dest_dir, "%s__%s_%d%s" % (stem, tag, k, ext))
+                    k += 1
+                target = cand
+            verified = False
+            try:
+                shutil.copy2(p, target)
+                src_md5 = fullhash(p)
+                if src_md5 != fullhash(target):
+                    raise IOError("hash mismatch after copy")
+                st = os.stat(target)
+                manifest[os.path.basename(target)] = {
+                    "card_path": os.path.relpath(p, card_root),
+                    "size": st.st_size, "md5": src_md5}
+                verified = True
+                copied += 1
+                # The copy is good and staged; an index failure must not make it
+                # look failed. `file` writes the row when it moves the file anyway.
                 try:
-                    os.remove(target)
-                except OSError:
-                    pass
-            failed += 1
-            if len(errs) < 10:
-                errs.append("%s: %s" % (p, e))
-        if copied - saved >= 200:
-            c.commit()
-            saved = copied
-            save_manifest()
-    c.commit()
-    c.close()
-    save_manifest()
+                    c.execute("insert or replace into files values(?,?,?,?,?)",
+                              (target, st.st_size, st.st_mtime,
+                               quickhash(target, st.st_size), None))
+                except Exception as e:
+                    if len(errs) < 10:
+                        errs.append("%s: copied OK, index not updated: %s" % (p, e))
+            except BaseException as e:
+                # Any failure before the copy was verified (a read error midway,
+                # a hash mismatch, an error while hashing) leaves a truncated or
+                # unchecked file at `target`. `file` would move it into the Library
+                # and the index has no row for it, so remove it now. `target` is
+                # always a fresh name (collisions are uniquified above), so this
+                # can only delete the copy made just now.
+                if not verified:
+                    try:
+                        os.remove(target)
+                    except OSError:
+                        pass
+                if not isinstance(e, Exception):
+                    raise                 # Ctrl-C: the finally below still saves
+                failed += 1
+                if len(errs) < 10:
+                    errs.append("%s: %s" % (p, e))
+            if copied - saved >= 200:
+                c.commit()
+                saved = copied
+                save_manifest()
+    finally:
+        # Also on Ctrl-C: without this the last <200 verified copies would
+        # have no manifest entry, and renamed ones could never verify.
+        c.commit()
+        c.close()
+        save_manifest()
     print("  copied %d, each verified by hash.  failed %d" % (copied, failed))
     for e in errs:
         print("    %s" % e)
@@ -1073,9 +1107,11 @@ def cmd_file(args):
     c.commit()
     c.close()
     for dp, dn, fn in os.walk(INBOX, topdown=False):
-        if not dn and fn == [MANIFEST] and dp != INBOX:
+        leftovers = {MANIFEST, MANIFEST + ".tmp"}
+        if not dn and fn and set(fn) <= leftovers and dp != INBOX:
             try:                      # everything it described has been filed
-                os.remove(os.path.join(dp, MANIFEST))
+                for x in fn:
+                    os.remove(os.path.join(dp, x))
                 fn = []
             except OSError:
                 pass
