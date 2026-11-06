@@ -24,6 +24,7 @@ import sys
 import os
 import json
 import sqlite3
+import time
 
 GENERIC_READ = 0x80000000
 SHARE_RW = 0x03
@@ -146,7 +147,11 @@ MANIFEST = ".extract-manifest.json"   # in <dest>: which entry wrote which file
 
 
 def read_manifest(dest):
-    """{basename: {"name", "cluster", "len"}} for entries this tool finished.
+    """{basename: {"name", "cluster", "len", "vol"}} for entries this tool finished.
+
+    "vol" is the card's exFAT volume serial number, so a record written for one
+    card never vouches for an entry on another that happens to share a name,
+    first cluster and length.
 
     A missing manifest is empty. An unreadable one is set aside and treated as
     empty: trusting nothing only costs a re-extraction, never a skipped photo.
@@ -157,6 +162,10 @@ def read_manifest(dest):
             m = json.load(fh)
         if not isinstance(m, dict):
             raise ValueError("not an object")
+        for base, rec in m.items():
+            if not (isinstance(rec, dict) and isinstance(rec.get("name"), str)
+                    and all(type(rec.get(k)) is int for k in ("cluster", "len", "vol"))):
+                raise ValueError("malformed record for %r" % base)
         return m
     except FileNotFoundError:
         return {}
@@ -180,7 +189,19 @@ def write_manifest(dest, manifest):
     os.replace(tmp, path)
 
 
-def unique_target(dest, name, first_cluster, claimed, length=None, manifest=None):
+def volume_id(boot):
+    """exFAT VolumeSerialNumber (boot sector offset 100)."""
+    return struct.unpack_from("<I", boot, 100)[0]
+
+
+def manifest_index(manifest):
+    """{(name, cluster, len, vol): basename}, so a lookup is O(1)."""
+    return {(r["name"], r["cluster"], r["len"], r["vol"]): base
+            for base, r in manifest.items()}
+
+
+def unique_target(dest, name, first_cluster, claimed, length=None, manifest=None,
+                  volume=None, index=None):
     """A destination path no other recovered entry has taken.
 
     Recovered entries routinely repeat a filename -- cameras reuse
@@ -191,16 +212,18 @@ def unique_target(dest, name, first_cluster, claimed, length=None, manifest=None
 
     Returns (path, already_done). already_done is True only when the manifest
     says a previous run extracted this same entry (name, first cluster, length)
-    and a file of that length is still there. Name and size alone are NOT
+    on this same card (volume serial) and a file of that length is still there. Name and size alone are NOT
     evidence: a file from another card or an earlier run can match both.
     """
     target = os.path.join(dest, name)
-    if manifest and length is not None:
-        for base, rec in manifest.items():
+    if manifest and length is not None and volume is not None:
+        if index is None:
+            index = manifest_index(manifest)
+        base = index.get((name, first_cluster, length, volume))
+        if base is not None:
             path = os.path.join(dest, base)
-            if (rec.get("name") == name and rec.get("cluster") == first_cluster
-                    and rec.get("len") == length and path not in claimed
-                    and os.path.isfile(path) and os.path.getsize(path) == length):
+            if (path not in claimed and os.path.isfile(path)
+                    and os.path.getsize(path) == length):
                 return path, True
     if target in claimed or os.path.exists(target):
         stem, ext = os.path.splitext(name)
@@ -211,6 +234,14 @@ def unique_target(dest, name, first_cluster, claimed, length=None, manifest=None
                                   % (stem, first_cluster, k, ext))
             k += 1
     return target, False
+
+
+def _move_aside(target, suffix):
+    try:
+        os.replace(target, target + suffix)
+        return True
+    except OSError:
+        return False
 
 
 def main():
@@ -274,86 +305,99 @@ def main():
         return fat_chain(state["fat"], start, need, cluster_count)
 
     manifest = read_manifest(dest)
-    new_since_save = 0
+    volume = volume_id(boot)
+    index = manifest_index(manifest)
+    last_save = time.monotonic()
+    dirty = False
+
+    def save_manifest():
+        # a full or locked destination must not abort the extraction; the cost
+        # of a missed save is only that those files are redone as duplicates
+        nonlocal last_save, dirty
+        try:
+            write_manifest(dest, manifest)
+            dirty = False
+        except OSError as e:
+            print("    WARNING: could not save %s: %s" % (MANIFEST, e))
+        last_save = time.monotonic()
+
     claimed = set()
     ok = 0
     short = 0
     badprev = 0
     failed = 0
     log = []
-    for i, r in enumerate(order, 1):
-        name = r["name"]
-        length = r["len"]
-        first = r["cluster"]
-        target, already = unique_target(dest, name, first, claimed, length,
-                                        manifest)
-        if already:
+    try:
+        for i, r in enumerate(order, 1):
+            name = r["name"]
+            length = r["len"]
+            first = r["cluster"]
+            target, already = unique_target(dest, name, first, claimed, length,
+                                            manifest, volume, index)
+            if already:
+                claimed.add(target)
+                ok += 1
+                continue
             claimed.add(target)
+            ncl = (length + cluster_bytes - 1) // cluster_bytes
+            if r["contig"]:
+                clusters = [first + k for k in range(ncl)]
+            else:
+                clusters = chain(first, ncl)
+            written = 0
+            try:
+                with open(target, "wb") as out:
+                    for cl in clusters:
+                        off = heap + (cl - 2) * cluster_bytes
+                        d.seek(off)
+                        chunk = d.read(cluster_bytes)
+                        if not chunk:
+                            break
+                        remain = length - written
+                        if len(chunk) > remain:
+                            chunk = chunk[:remain]
+                        out.write(chunk)
+                        written += len(chunk)
+                        if written >= length:
+                            break
+            except Exception as e:
+                failed += 1
+                log.append((name, "write error: " + str(e)))
+                continue
+            if written != length:
+                short += 1
+                # rename it out of the way: left as-is it looks like a recovered
+                # photo in the output folder, and only the log says otherwise.
+                # (Resume does not depend on this: the manifest decides.)
+                where = ".partial" if _move_aside(target, ".partial") else "left in place"
+                log.append((name, "short: %d of %d bytes (saved as %s)"
+                            % (written, length, where)))
+                continue
+            pv = preview_ok(target)
+            if pv is False:
+                badprev += 1
+                # same treatment as short files, so it does not sit in the output
+                # folder looking like a good photo
+                where = ".suspect" if _move_aside(target, ".suspect") else "left in place"
+                log.append((name, "preview does not terminate, data suspect "
+                            "(saved as %s)" % where))
+                continue                        # counted once, as suspect, not as ok
             ok += 1
-            continue
-        claimed.add(target)
-        ncl = (length + cluster_bytes - 1) // cluster_bytes
-        if r["contig"]:
-            clusters = [first + k for k in range(ncl)]
-        else:
-            clusters = chain(first, ncl)
-        written = 0
-        try:
-            with open(target, "wb") as out:
-                for cl in clusters:
-                    off = heap + (cl - 2) * cluster_bytes
-                    d.seek(off)
-                    chunk = d.read(cluster_bytes)
-                    if not chunk:
-                        break
-                    remain = length - written
-                    if len(chunk) > remain:
-                        chunk = chunk[:remain]
-                    out.write(chunk)
-                    written += len(chunk)
-                    if written >= length:
-                        break
-        except Exception as e:
-            failed += 1
-            log.append((name, "write error: " + str(e)))
-            continue
-        if written != length:
-            short += 1
-            # rename it out of the way: left as-is it looks like a recovered
-            # photo in the output folder, and only the log says otherwise
-            try:
-                os.replace(target, target + ".partial")
-            except OSError:
-                pass
-            log.append((name, "short: %d of %d bytes (saved as .partial)"
-                        % (written, length)))
-            continue
-        pv = preview_ok(target)
-        if pv is False:
-            badprev += 1
-            # same treatment as short files: left at its normal name with the
-            # full length, a re-run would take it for a finished extraction
-            # and count it as ok
-            try:
-                os.replace(target, target + ".suspect")
-            except OSError:
-                pass
-            log.append((name, "preview does not terminate, data suspect "
-                        "(saved as .suspect)"))
-            continue                        # counted once, as suspect, not as ok
-        ok += 1
-        manifest[os.path.basename(target)] = {"name": name, "cluster": first,
-                                              "len": length}
-        new_since_save += 1
-        if new_since_save >= 25:
-            write_manifest(dest, manifest)
-            new_since_save = 0
-        if i % 100 == 0:
-            print("    %d / %d   ok=%d short=%d suspect=%d"
-                  % (i, len(order), ok, short, badprev))
-    d.close()
-    if new_since_save:
-        write_manifest(dest, manifest)
+            base = os.path.basename(target)
+            manifest[base] = {"name": name, "cluster": first, "len": length,
+                              "vol": volume}
+            index[(name, first, length, volume)] = base
+            dirty = True
+            # time-based: rewriting the whole file every N files is quadratic
+            if time.monotonic() - last_save >= 30:
+                save_manifest()
+            if i % 100 == 0:
+                print("    %d / %d   ok=%d short=%d suspect=%d"
+                      % (i, len(order), ok, short, badprev))
+    finally:
+        d.close()
+        if dirty:
+            save_manifest()
 
     print("")
     print("  extracted              : %d" % ok)

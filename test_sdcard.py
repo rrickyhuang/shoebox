@@ -495,16 +495,24 @@ def _t_unique_target():
               len({t1, t2, t3}) == 3, "paths: %s" % [os.path.basename(x) for x in (t1, t2, t3)])
 
         # a previous run already wrote this exact entry, complete -- and the
-        # manifest says so
+        # manifest says so (same card: same volume serial)
+        V = 0xABCD1234
         write(os.path.join(dest, "IMG_9.CR2"), b"z" * 64)
-        man = {"IMG_9.CR2": {"name": "IMG_9.CR2", "cluster": 77, "len": 64}}
-        t4, done = X.unique_target(dest, "IMG_9.CR2", 77, set(), 64, man)
+        man = {"IMG_9.CR2": {"name": "IMG_9.CR2", "cluster": 77, "len": 64, "vol": V}}
+        t4, done = X.unique_target(dest, "IMG_9.CR2", 77, set(), 64, man, V)
         check("#3: an entry the manifest recorded is recognised, not redone",
               done and os.path.basename(t4) == "IMG_9.CR2")
 
+        # same name, cluster AND length but a different card: must not be taken
+        # for ours (two freshly formatted cards share all three)
+        t4b, done = X.unique_target(dest, "IMG_9.CR2", 77, set(), 64, man, V + 1)
+        check("#3: a record from another card's volume is not trusted",
+              not done and os.path.basename(t4b) != "IMG_9.CR2",
+              "went to %s" % os.path.basename(t4b))
+
         # same name AND size on disk, but no manifest record: another card's
         # file. It must be kept, and this entry must get its own path
-        t5, done = X.unique_target(dest, "IMG_9.CR2", 88, set(), 64, man)
+        t5, done = X.unique_target(dest, "IMG_9.CR2", 88, set(), 64, man, V)
         check("#3: a same-name same-size file from elsewhere is not taken for ours",
               not done and os.path.basename(t5) != "IMG_9.CR2",
               "went to %s" % os.path.basename(t5))
@@ -514,25 +522,41 @@ def _t_unique_target():
 
         # the entry that was redirected to a __cl name is recognised on re-run
         write(t5, b"q" * 64)
-        man[os.path.basename(t5)] = {"name": "IMG_9.CR2", "cluster": 88, "len": 64}
-        t6, done = X.unique_target(dest, "IMG_9.CR2", 88, set(), 64, man)
+        man[os.path.basename(t5)] = {"name": "IMG_9.CR2", "cluster": 88, "len": 64,
+                                     "vol": V}
+        t6, done = X.unique_target(dest, "IMG_9.CR2", 88, set(), 64, man, V)
         check("#3: a redirected entry is found again through the manifest",
               done and t6 == t5)
 
+        # a prebuilt index gives the same answer
+        idx = X.manifest_index(man)
+        t6b, done = X.unique_target(dest, "IMG_9.CR2", 88, set(), 64, man, V, idx)
+        check("#3: lookup through a prebuilt index agrees", done and t6b == t5)
+
         # recorded but the file is now the wrong length (truncated since)
         write(t5, b"q" * 10)
-        t7, done = X.unique_target(dest, "IMG_9.CR2", 88, set(), 64, man)
+        t7, done = X.unique_target(dest, "IMG_9.CR2", 88, set(), 64, man, V)
         check("#3: a recorded file whose length changed is not trusted",
               not done)
 
         # manifest round trip, and a corrupt one is ignored (and set aside)
         X.write_manifest(dest, man)
         check("#3: manifest round-trips", X.read_manifest(dest) == man)
-        with open(os.path.join(dest, X.MANIFEST), "w") as fh:
-            fh.write("{not json")
-        check("#3: a corrupt manifest is ignored and moved aside",
-              X.read_manifest(dest) == {}
-              and os.path.exists(os.path.join(dest, X.MANIFEST + ".bad")))
+        bad_path = os.path.join(dest, X.MANIFEST)
+        for label, text in (("invalid JSON", "{not json"),
+                            ("record is a number", '{"a": 1}'),
+                            ("record is null", '{"a": null}'),
+                            ("record missing vol",
+                             '{"a": {"name": "a", "cluster": 1, "len": 2}}'),
+                            ("cluster is a string",
+                             '{"a": {"name": "a", "cluster": "1", "len": 2, "vol": 3}}')):
+            with open(bad_path, "w") as fh:
+                fh.write(text)
+            got = X.read_manifest(dest)
+            check("#3: a bad manifest (%s) is ignored and moved aside" % label,
+                  got == {} and os.path.exists(bad_path + ".bad")
+                  and not os.path.exists(bad_path))
+            os.remove(bad_path + ".bad")
     finally:
         shutil.rmtree(root, ignore_errors=True)
 
@@ -864,6 +888,7 @@ def _t_integrity_unlistable():
     import integrity
     root = sandbox()
     real_walk = os.walk
+    real_lib = integrity.LIB
     try:
         write(os.path.join(sdcard.LIB, "ok", "A.CR2"), b"x")
         integrity.LIB = sdcard.LIB
@@ -883,6 +908,7 @@ def _t_integrity_unlistable():
               len(files) == 1 and bad_dirs == [])
     finally:
         os.walk = real_walk
+        integrity.LIB = real_lib
         shutil.rmtree(root, ignore_errors=True)
 
 
