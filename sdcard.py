@@ -672,6 +672,17 @@ def cmd_verify(args):
             if not os.path.isfile(src):
                 unmatched.append(f)       # that file is not on this card
                 continue
+            try:
+                # The staged copy still equals what ingest read, but the file
+                # at that path now differs: a different card with the same
+                # layout (or one edited since). Do not call good files bad.
+                if (os.path.getsize(src) != ent["size"]
+                        or fullhash(src) != ent["md5"]) \
+                        and fullhash(f) == ent["md5"]:
+                    unmatched.append(f)
+                    continue
+            except (OSError, KeyError):
+                pass
         elif base in ambiguous or base not in card:
             unmatched.append(f)
             continue
@@ -863,7 +874,17 @@ def cmd_ingest(args):
     copied = failed = 0
     errs = []
     card_root = drive if drive.endswith((os.sep, "/")) else drive + os.sep
-    manifest = {}
+    manifest, saved = {}, 0
+
+    def save_manifest():
+        # Best effort: a failed write must not abort the run after the copies
+        # are made; verify falls back to name matching without a manifest.
+        if manifest:
+            try:
+                write_manifest(dest_dir, manifest)
+            except OSError as e:
+                print("  WARNING: could not write %s: %s" % (MANIFEST, e))
+
     for p, _ in new:
         name = os.path.basename(p)
         target = os.path.join(dest_dir, name)
@@ -888,14 +909,14 @@ def cmd_ingest(args):
             src_md5 = fullhash(p)
             if src_md5 != fullhash(target):
                 raise IOError("hash mismatch after copy")
-            verified = True
             st = os.stat(target)
-            c.execute("insert or replace into files values(?,?,?,?,?)",
-                      (target, st.st_size, st.st_mtime,
-                       quickhash(target, st.st_size), None))
             manifest[os.path.basename(target)] = {
                 "card_path": os.path.relpath(p, card_root),
                 "size": st.st_size, "md5": src_md5}
+            verified = True
+            c.execute("insert or replace into files values(?,?,?,?,?)",
+                      (target, st.st_size, st.st_mtime,
+                       quickhash(target, st.st_size), None))
             copied += 1
         except Exception as e:
             # Any failure before the copy was verified (a read error midway,
@@ -912,14 +933,13 @@ def cmd_ingest(args):
             failed += 1
             if len(errs) < 10:
                 errs.append("%s: %s" % (p, e))
-        if copied % 200 == 0:
+        if copied - saved >= 200:
             c.commit()
-            if manifest:
-                write_manifest(dest_dir, manifest)
+            saved = copied
+            save_manifest()
     c.commit()
     c.close()
-    if manifest:
-        write_manifest(dest_dir, manifest)
+    save_manifest()
     print("  copied %d, each verified by hash.  failed %d" % (copied, failed))
     for e in errs:
         print("    %s" % e)

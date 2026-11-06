@@ -692,6 +692,33 @@ def _t_verify_manifest():
 
 
 _guard("verify manifest", _t_verify_manifest)
+
+
+def _t_verify_wrong_card():
+    root = sandbox()
+    cardroot = tempfile.mkdtemp(prefix="sdcard_")
+    try:
+        a = os.path.join(cardroot, "A")
+        b = os.path.join(cardroot, "B")
+        write(os.path.join(a, "DCIM", "100CANON", "IMG_1.CR2"), b"card-A-photo")
+        write(os.path.join(b, "DCIM", "100CANON", "IMG_1.CR2"), b"card-B-photo")
+        write(os.path.join(sdcard.LIB, "other.CR2"), b"unrelated")
+        sdcard.cmd_index([])
+        with contextlib.redirect_stdout(io.StringIO()):
+            sdcard.cmd_ingest([a, "--execute"])
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            sdcard.cmd_verify([b])
+        q = os.path.join(sdcard.INBOX, sdcard.QUARANTINE)
+        check("review: verifying the wrong card quarantines nothing",
+              not os.path.isdir(q) and "NOT CLEAR" in out.getvalue(),
+              out.getvalue().strip()[-160:])
+    finally:
+        shutil.rmtree(cardroot, ignore_errors=True)
+        shutil.rmtree(root, ignore_errors=True)
+
+
+_guard("verify wrong card", _t_verify_wrong_card)
 bad = [n for n, ok, _ in results if not ok]
 print("  %d/%d passed" % (len(results) - len(bad), len(results)))
 if bad:
