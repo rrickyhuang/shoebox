@@ -798,6 +798,35 @@ def _t_manifest_malformed():
 
 
 _guard("manifest malformed", _t_manifest_malformed)
+
+
+def _t_integrity_unlistable():
+    import integrity
+    root = sandbox()
+    real_walk = os.walk
+    try:
+        write(os.path.join(sdcard.LIB, "ok", "A.CR2"), b"x")
+        integrity.LIB = sdcard.LIB
+
+        def walk(top, onerror=None, **k):
+            if onerror:
+                onerror(PermissionError(13, "denied", os.path.join(top, "locked")))
+            return real_walk(top, onerror=onerror, **k)
+        os.walk = walk
+        files, bad_dirs = integrity.list_files()
+        check("integrity: an unlistable folder is reported, not dropped silently",
+              len(files) == 1 and bad_dirs == [os.path.join(sdcard.LIB, "locked")],
+              "%s %s" % (files, bad_dirs))
+        os.walk = real_walk
+        files, bad_dirs = integrity.list_files()
+        check("integrity: a fully listable library reports no failed folders",
+              len(files) == 1 and bad_dirs == [])
+    finally:
+        os.walk = real_walk
+        shutil.rmtree(root, ignore_errors=True)
+
+
+_guard("integrity unlistable dirs", _t_integrity_unlistable)
 bad = [n for n, ok, _ in results if not ok]
 print("  %d/%d passed" % (len(results) - len(bad), len(results)))
 if bad:
