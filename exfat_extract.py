@@ -142,7 +142,45 @@ def fat_chain(fat, start, need, cluster_count):
     return out
 
 
-def unique_target(dest, name, first_cluster, claimed, length=None):
+MANIFEST = ".extract-manifest.json"   # in <dest>: which entry wrote which file
+
+
+def read_manifest(dest):
+    """{basename: {"name", "cluster", "len"}} for entries this tool finished.
+
+    A missing manifest is empty. An unreadable one is set aside and treated as
+    empty: trusting nothing only costs a re-extraction, never a skipped photo.
+    """
+    path = os.path.join(dest, MANIFEST)
+    try:
+        with open(path, encoding="utf-8") as fh:
+            m = json.load(fh)
+        if not isinstance(m, dict):
+            raise ValueError("not an object")
+        return m
+    except FileNotFoundError:
+        return {}
+    except (OSError, ValueError) as e:
+        print("  WARNING: %s unreadable (%s); ignoring it, nothing will be "
+              "treated as already extracted." % (MANIFEST, e))
+        try:
+            os.replace(path, path + ".bad")
+        except OSError:
+            pass
+        return {}
+
+
+def write_manifest(dest, manifest):
+    path = os.path.join(dest, MANIFEST)
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump(manifest, fh)
+        fh.flush()
+        os.fsync(fh.fileno())
+    os.replace(tmp, path)
+
+
+def unique_target(dest, name, first_cluster, claimed, length=None, manifest=None):
     """A destination path no other recovered entry has taken.
 
     Recovered entries routinely repeat a filename -- cameras reuse
@@ -151,13 +189,19 @@ def unique_target(dest, name, first_cluster, claimed, length=None):
     the first or was skipped by the resume check, and BOTH were counted as
     extracted. On a failing card there is no second chance.
 
-    Returns (path, already_done). already_done is True only when a previous
-    run of this same entry left a complete file there.
+    Returns (path, already_done). already_done is True only when the manifest
+    says a previous run extracted this same entry (name, first cluster, length)
+    and a file of that length is still there. Name and size alone are NOT
+    evidence: a file from another card or an earlier run can match both.
     """
     target = os.path.join(dest, name)
-    if target not in claimed and os.path.exists(target) and length is not None \
-            and os.path.getsize(target) == length:
-        return target, True
+    if manifest and length is not None:
+        for base, rec in manifest.items():
+            path = os.path.join(dest, base)
+            if (rec.get("name") == name and rec.get("cluster") == first_cluster
+                    and rec.get("len") == length and path not in claimed
+                    and os.path.isfile(path) and os.path.getsize(path) == length):
+                return path, True
     if target in claimed or os.path.exists(target):
         stem, ext = os.path.splitext(name)
         target = os.path.join(dest, "%s__cl%d%s" % (stem, first_cluster, ext))
@@ -229,6 +273,8 @@ def main():
                 print("             files may come out incomplete.")
         return fat_chain(state["fat"], start, need, cluster_count)
 
+    manifest = read_manifest(dest)
+    new_since_save = 0
     claimed = set()
     ok = 0
     short = 0
@@ -239,7 +285,8 @@ def main():
         name = r["name"]
         length = r["len"]
         first = r["cluster"]
-        target, already = unique_target(dest, name, first, claimed, length)
+        target, already = unique_target(dest, name, first, claimed, length,
+                                        manifest)
         if already:
             claimed.add(target)
             ok += 1
@@ -295,10 +342,18 @@ def main():
                         "(saved as .suspect)"))
             continue                        # counted once, as suspect, not as ok
         ok += 1
+        manifest[os.path.basename(target)] = {"name": name, "cluster": first,
+                                              "len": length}
+        new_since_save += 1
+        if new_since_save >= 25:
+            write_manifest(dest, manifest)
+            new_since_save = 0
         if i % 100 == 0:
             print("    %d / %d   ok=%d short=%d suspect=%d"
                   % (i, len(order), ok, short, badprev))
     d.close()
+    if new_since_save:
+        write_manifest(dest, manifest)
 
     print("")
     print("  extracted              : %d" % ok)
