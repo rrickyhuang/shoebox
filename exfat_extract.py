@@ -284,7 +284,15 @@ def main():
         pv = preview_ok(target)
         if pv is False:
             badprev += 1
-            log.append((name, "preview does not terminate, data suspect"))
+            # same treatment as short files: left at its normal name with the
+            # full length, a re-run would take it for a finished extraction
+            # and count it as ok
+            try:
+                os.replace(target, target + ".suspect")
+            except OSError:
+                pass
+            log.append((name, "preview does not terminate, data suspect "
+                        "(saved as .suspect)"))
             continue                        # counted once, as suspect, not as ok
         ok += 1
         if i % 100 == 0:
