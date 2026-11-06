@@ -798,6 +798,38 @@ def _t_manifest_malformed():
 
 
 _guard("manifest malformed", _t_manifest_malformed)
+
+
+def _t_record_shoot_day_read_error():
+    root = sandbox()
+    try:
+        check("record_shoot_day: a missing trips.json starts a new one",
+              sdcard.record_shoot_day("2026-01-02") is True
+              and '"2026-01-02"' in open(sdcard.TRIPS_JSON).read())
+        with open(sdcard.TRIPS_JSON, "w") as fh:
+            fh.write('{"trips": [{"start": "2025-05-01", "end": "2025-05-09", "name": "A"}]}')
+        before = open(sdcard.TRIPS_JSON).read()
+        real_open = open
+
+        def locked(path, *a, **k):
+            if path == sdcard.TRIPS_JSON and not (a and "w" in a[0]):
+                raise PermissionError("locked")
+            return real_open(path, *a, **k)
+        sdcard.open = locked
+        try:
+            sdcard.record_shoot_day("2026-01-03")
+            raised = False
+        except PermissionError:
+            raised = True
+        finally:
+            del sdcard.open
+        check("record_shoot_day: a read error propagates and trips.json is untouched",
+              raised and open(sdcard.TRIPS_JSON).read() == before)
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+_guard("record_shoot_day read error", _t_record_shoot_day_read_error)
 bad = [n for n, ok, _ in results if not ok]
 print("  %d/%d passed" % (len(results) - len(bad), len(results)))
 if bad:

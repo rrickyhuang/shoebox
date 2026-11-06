@@ -270,9 +270,13 @@ def record_shoot_day(date):
     places. Writing it down means destination() routes everything later for
     that date to the same folder.
     """
+    # Only a missing file means "start empty". Any other failure (locked,
+    # permission, half-written JSON) must stop the run: starting from an empty
+    # document would replace the whole trip list with this one entry.
     try:
-        doc = json.load(open(TRIPS_JSON, encoding="utf-8"))
-    except Exception:
+        with open(TRIPS_JSON, encoding="utf-8") as fh:
+            doc = json.load(fh)
+    except FileNotFoundError:
         doc = {"trips": []}
     trips = doc.setdefault("trips", [])
     if any(t["start"] == date for t in trips):
