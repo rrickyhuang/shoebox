@@ -143,12 +143,23 @@ def check(path):
         return "unchecked", "read error: %s" % str(e)[:60]
 
 
-def main():
-    files = []
-    for dp, dn, fn in os.walk(LIB):
+def list_files():
+    """(files to check, directories that could not be listed).
+
+    os.walk silently drops a subtree it cannot list; collect those so a clean
+    report cannot hide an incomplete sweep.
+    """
+    files, unlistable = [], []
+    for dp, dn, fn in os.walk(LIB, onerror=lambda e: unlistable.append(
+            getattr(e, "filename", None) or str(e))):
         for f in fn:
             if os.path.splitext(f)[1].lower() in RAW + (".jpg", ".jpeg"):
                 files.append(os.path.join(dp, f))
+    return files, unlistable
+
+
+def main():
+    files, unlistable = list_files()
     print("  sweeping %d files%s" % (len(files), "  (with full preview decode)" if DECODE else ""))
 
     tally = collections.Counter()
@@ -181,7 +192,14 @@ def main():
                 fh.write("%s\t%s\n" % (p, d))
         print("")
         print("  -> damaged.txt")
-    else:
+    if unlistable:
+        print("")
+        print("  INCOMPLETE: %d folder(s) could not be listed, so their files were"
+              % len(unlistable))
+        print("  not swept:")
+        for d in unlistable:
+            print("    %s" % d)
+    elif not damaged:
         print("")
         print("  no damage found.")
 
