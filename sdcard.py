@@ -54,7 +54,7 @@ QUICK = 64 * 1024
 # DateTimeOriginal BLANK, writing only the scan date. Dating them by file mtime
 # would file a whole roll under the day it was downloaded, which is meaningless,
 # so they are grouped by roll instead and dated later by hand in darktable.
-FILM_RE = re.compile(r"^(\d{8})(\d{4})$")
+FILM_RE = re.compile(r"^(\d{8})(\d{4})(?:_\d+)?$")
 FILM_DIR = "Film"
 # A day with at least this many frames from a camera that is NOT the
 # everyday-carry Ricoh gets its own dated folder rather than going to Diary.

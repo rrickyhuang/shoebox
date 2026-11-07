@@ -271,6 +271,34 @@ def _t_camera_rules():
                                          "end": "2026-04-03", "name": "x"}]) == set())
 
 
+def _t_film_roll():
+    # Real lab scans on E: come in two shapes: a bare 12-digit stem, and the
+    # same stem with the frame number repeated after an underscore. Roll
+    # 00007061 arrived as 000070610005_5.jpg and was silently treated as an
+    # ordinary photo, so its frames were filed by date instead of by roll.
+    check("film: bare 12-digit stem is a roll",
+          sdcard.film_roll("001435410001.jpg") == "00143541")
+    check("film: _frame suffix is the same roll",
+          sdcard.film_roll("000070610005_5.jpg") == "00007061")
+    check("film: multi-digit suffix too",
+          sdcard.film_roll("000070610024_24.jpg") == "00007061")
+    check("film: suffix does not change the roll id",
+          sdcard.film_roll("000070610005_5.jpg")
+          == sdcard.film_roll("000070610005.jpg"))
+    check("film: camera files are not rolls",
+          sdcard.film_roll("IMG_3999.jpg") is None
+          and sdcard.film_roll("R0000709.jpg") is None)
+    check("film: a raw file is never a roll even if the stem matches",
+          sdcard.film_roll("001435410001.CR2") is None)
+    check("film: wrong digit count is not a roll",
+          sdcard.film_roll("00143541000.jpg") is None
+          and sdcard.film_roll("0014354100012.jpg") is None)
+    check("film: a non-numeric suffix is not a roll",
+          sdcard.film_roll("001435410001_a.jpg") is None)
+    check("film: an empty suffix is not a roll",
+          sdcard.film_roll("001435410001_.jpg") is None)
+
+
 def _t_walk_errors():
     root = sandbox()
     try:
@@ -913,9 +941,9 @@ def _t_integrity_unlistable():
 
 
 _guard("integrity unlistable dirs", _t_integrity_unlistable)
+_guard("film roll naming", _t_film_roll)
 bad = [n for n, ok, _ in results if not ok]
 print("  %d/%d passed" % (len(results) - len(bad), len(results)))
 if bad:
     print("  FAILING: " + ", ".join(bad))
     sys.exit(1)
-
