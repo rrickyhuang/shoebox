@@ -133,6 +133,10 @@ mutation-tested: each bug was deliberately reintroduced to confirm the suite
 catches it. Twice a test passed while the thing it named was broken, so a green
 run on its own is not evidence.
 
+The suite also checks its own size: it fails if fewer than `MIN_CHECKS`
+checks ran, because a test that stops being registered otherwise passes
+silently.
+
 ## Recovering a damaged card
 
 The three `exfat_*` tools are a pipeline and must run in order. Each writes its
