@@ -14,9 +14,13 @@
 !test_sdcard.py
 
 # CI
+# '*' above matches at every directory level, so each new file under .github/
+# needs its own '!' line or it is committed as nothing. The glob covers further
+# workflows; anything else there (dependabot.yml, CODEOWNERS, issue templates)
+# has to be added by name.
 !.github/
 !.github/workflows/
-!.github/workflows/tests.yml
+!.github/workflows/*.yml
 
 # Deliberately NOT tracked:
 #   canon_split.json  - generated run data; a list of absolute paths to photos
