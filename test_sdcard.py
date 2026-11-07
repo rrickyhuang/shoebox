@@ -299,6 +299,42 @@ def _t_film_roll():
           sdcard.film_roll("001435410001_.jpg") is None)
 
 
+def _t_film_routing():
+    # The checks above only exercise film_roll() in isolation. Deleting the
+    # whole routing block from cmd_file left the suite at 87/87 green, so the
+    # behaviour this exists to protect had no coverage at all. These stage real
+    # scans in the Inbox and assert where they come out.
+    #
+    # The scans carry no EXIF, so without the routing they fall through to
+    # capture_info(), pick up today's mtime, and land in a dated Diary folder -
+    # which is the original bug, 72 frames of it on E:.
+    root = sandbox()
+    try:
+        suffixed = "000070610005_5.jpg"       # roll 00007061, the live naming
+        bare = "001435410001.jpg"             # roll 00143541
+        write(os.path.join(sdcard.INBOX, "card", suffixed), b"no-exif-a")
+        write(os.path.join(sdcard.INBOX, "card", suffixed + ".xmp"), b"SIDECAR-A")
+        write(os.path.join(sdcard.INBOX, "card", bare), b"no-exif-b")
+        with contextlib.redirect_stdout(io.StringIO()):
+            sdcard.cmd_file(["--execute"])
+
+        got = {os.path.relpath(f, sdcard.LIB) for f in allfiles(sdcard.LIB)}
+        want_a = os.path.join("Film", "00007061", suffixed)
+        want_b = os.path.join("Film", "00143541", bare)
+        check("film routing: a _frame-suffixed scan is filed under its roll",
+              want_a in got, "library holds %s" % sorted(got))
+        check("film routing: its sidecar travels with it",
+              want_a + ".xmp" in got, "library holds %s" % sorted(got))
+        check("film routing: a bare-stemmed scan is filed under its roll",
+              want_b in got, "library holds %s" % sorted(got))
+        # the failure mode, stated directly: nothing may be filed by date
+        strays = [g for g in got if not g.startswith("Film" + os.sep)]
+        check("film routing: no scan is filed into a dated folder",
+              not strays, "escaped to %s" % sorted(strays))
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
 def _t_walk_errors():
     root = sandbox()
     try:
@@ -942,6 +978,7 @@ def _t_integrity_unlistable():
 
 _guard("integrity unlistable dirs", _t_integrity_unlistable)
 _guard("film roll naming", _t_film_roll)
+_guard("film routing", _t_film_routing)
 bad = [n for n, ok, _ in results if not ok]
 print("  %d/%d passed" % (len(results) - len(bad), len(results)))
 if bad:

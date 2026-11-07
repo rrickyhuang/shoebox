@@ -50,7 +50,10 @@ SKIP_DIRS = {"archive", "inbox", "$recycle.bin", "system volume information",
              "_rescued from old lightroom catalog"}
 QUICK = 64 * 1024
 # Lab film scans: this lab names every frame RRRRRRRRFFFF.jpg -- 8-digit order
-# number then a 4-digit frame number -- and the Noritsu scanner leaves
+# number then a 4-digit frame number -- sometimes with the frame number repeated
+# after an underscore, RRRRRRRRFFFF_F.jpg. Both shapes are live: 2 of the 11
+# rolls on E: (72 frames) use the suffixed form exclusively, so the optional
+# group below is load-bearing, not defensive. And the Noritsu scanner leaves
 # DateTimeOriginal BLANK, writing only the scan date. Dating them by file mtime
 # would file a whole roll under the day it was downloaded, which is meaningless,
 # so they are grouped by roll instead and dated later by hand in darktable.

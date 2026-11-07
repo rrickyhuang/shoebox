@@ -86,9 +86,10 @@ Library/<year>/<year>_Diary/               everyday-carry frames
 Library/Film/<roll-id>/                    lab film scans, grouped by roll
 ```
 
-1. A JPEG named `RRRRRRRRFFFF.jpg` is a lab film scan and goes to `Film/<roll>/`.
-   Scans have no capture date at all, so dating them by file time would file a
-   whole roll under the day it was downloaded.
+1. A JPEG named `RRRRRRRRFFFF.jpg` -- or `RRRRRRRRFFFF_F.jpg`, where the lab
+   repeats the frame number after an underscore -- is a lab film scan and goes to
+   `Film/<roll>/`. Scans have no capture date at all, so dating them by file time
+   would file a whole roll under the day it was downloaded.
 2. Otherwise, if the capture date falls inside a window in `trips.json`, it goes
    to that trip.
 3. Otherwise, if that day has 20+ frames from a camera that is not the
