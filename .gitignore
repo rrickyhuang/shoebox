@@ -13,6 +13,11 @@
 !exfat_extract.py
 !test_sdcard.py
 
+# CI
+!.github/
+!.github/workflows/
+!.github/workflows/tests.yml
+
 # Deliberately NOT tracked:
 #   canon_split.json  - generated run data; a list of absolute paths to photos
 #   __pycache__/      - build artefact
