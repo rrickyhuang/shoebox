@@ -14,6 +14,14 @@ import tempfile
 import hashlib
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+# A green run is only evidence if the whole suite ran, and nothing below asserts
+# how many checks exist. A _guard that stops being registered, or an early return
+# in a test body, shrinks the suite silently and still exits 0 -- so a lost test
+# looks exactly like a passing one. MIN_CHECKS makes that a failure instead.
+# Raise it when you add checks. Never lower it to make a run pass.
+MIN_CHECKS = 91
+
 import sdcard
 
 
@@ -981,6 +989,11 @@ _guard("film roll naming", _t_film_roll)
 _guard("film routing", _t_film_routing)
 bad = [n for n, ok, _ in results if not ok]
 print("  %d/%d passed" % (len(results) - len(bad), len(results)))
+if len(results) < MIN_CHECKS:
+    print("  SUITE SHRANK: %d checks ran, expected at least %d."
+          % (len(results), MIN_CHECKS))
+    print("  A test stopped running -- a pass here is a false negative.")
+    sys.exit(1)
 if bad:
     print("  FAILING: " + ", ".join(bad))
     sys.exit(1)
